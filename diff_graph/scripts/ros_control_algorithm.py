@@ -1,206 +1,152 @@
-#!/usr/bin/env python3
-
+#!/usr/bin/env python
+# license removed for brevity
 import rospy
 from std_msgs.msg import Float64
+import math
+import time
+from roboclaw import Roboclaw
 
-from tkinter import *
-from PIL import Image, ImageTk
-import numpy as np
-from pyzbar import pyzbar
+target_left = 0
+target_right = 0
 
-import cv2
-import sys
+def vel_left_callback(data):
+    global target_left
+    target_left = data.data
 
-      
+def vel_right_callback(data):
+    global target_right
+    target_right = data.data 
 
-angular_right = 0
-angular_left = 0
-theta_odom = 0
+def main_roboclaw():
+    #roboclaw settings
+    roboclaw = Roboclaw("/dev/ttyACM0", 38400)
+    roboclaw.Open()
 
+    elapsed_time = 0
+    last_time = 0
+    sample_time = 0.1 #in seconds
 
-def theta_callback(data):
-    global theta_odom
-    theta_odom = data.data
-    print ("Estoy leyendo en theta: ", theta_odom)
+    #pid variables
+    Kp_izq = 10.0
+    Ki_izq = 50.0
+    Kd_izq = 0.01
 
-def toggle():
-    btn.config(text=btnVar.get())
+    cv1_izq = 0
+    error1_izq = 0
+    error2_izq = 0
 
+    Kp_der = 10.0
+    Ki_der = 50.0
+    Kd_der = 0.01
 
-def onClosing():
-     #arduino.sendData([0,0])
-     #arduino.close()
-     cap.release()
-     print("Cámara desconectada")
-     root.destroy()
-     
-
-def qrDetection(frame):
-
-    cx = 0
-    cy = 0
-    cxd = 0
-    cyd = 0
+    cv1_der = 0
+    error1_der = 0
+    error2_der = 0
     
-    isRobot = False
-    isObject = False
+    #parametros del bot
+    largo = 0.311
+    radio = 0.034
 
-    barcodes = pyzbar.decode(frame)
-    
-    for barcode in barcodes:
-        (x, y, w, h) = barcode.rect
-        barcodeData = barcode.data.decode("utf-8")
+    #parametros iniciales
+    theta = 0.0
+    wL = 0.0
+    wR = 0.0
 
-        if(barcodeData=="Robot4"):
-            isRobot = True
-            cx = x + (w)//2
-            cy = y + (h)//2
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+    pub_rad = rospy.Publisher('th_odom_rad', Float64, queue_size=10)
+    pub_right = rospy.Publisher('real_right', Float64, queue_size=10)
+    pub_left = rospy.Publisher('real_left', Float64, queue_size=10)
+    rospy.Subscriber("target_right", Float64, vel_right_callback)
+    rospy.Subscriber("target_left", Float64, vel_left_callback)
+    rospy.init_node('main_roboclaw', anonymous=True)
 
-        if(barcodeData=="Objeto"):
-            isObject = True
-            cxd = x + (w)//2
-            cyd = y + (h)//2
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+    rate = rospy.Rate(1/sample_time) # 10hz
+    roboclaw.ResetEncoders(0x81)
+    last_time = time.time()
 
-    return frame,cxd,cyd,cx,cy,isRobot,isObject
-
-
-def callback():
-     
-     ret, frame = cap.read()
-
-     if ret:
-          
-
-          frame,cxd,cyd,cx,cy,isRobot,isObject = qrDetection(frame)
-
-          cv2.circle(frame,(cxd,cyd), 5,(0,255,0),-1)
-          cv2.circle(frame,(cx,cy), 5,(0,0,255),-1)
+    while not rospy.is_shutdown():
         
-          
-          
+        nR = roboclaw.ReadEncM1(0x81)
+        nL = roboclaw.ReadEncM2(0x81)
+        #print(nR[1])       
+        
+        elapsed_time = time.time() - last_time
+        #print (elapsed_time)
+        
+        # Rueda derecha
+        wR = nR[1]*math.pi*2/1425.1/elapsed_time
+        rpmR = wR * 30.0 / math.pi
+        print("Right Real Velocity: ", wR)
+        print("Right Target Velocity: ", target_right)
+        # print("RPM en llanta derecha: ", rpmR)
 
-          if(isRobot and isObject):
-
-              ####################### Conversion coordenadas ##################
-              hxd = cxd - frame.shape[1]/2
-              hyd = frame.shape[0]/2 - cyd
-
-              hx = cx - frame.shape[1]/2
-              hy = frame.shape[0]/2 - cy
-
-              ###################### Algoritmo de control ###################
-              a = 0.04085
-              phi.set(theta_odom)
-
-              # Errores
-
-              hxe = hxd - hx
-              hye = hyd - hy
-              pub_y_target.publish(hyd)
-              pub_x_target.publish(hxd)
-              pub_x_real.publish(hx)
-              pub_y_real.publish(hy)
-              
-              he = np.array([[hxe],[hye]])
-
-              K = np.diag([0.0005,0.0005])
-
-              J = np.array([[-np.sin(phi.get()),-a*np.cos(phi.get())],
-                            [np.cos(phi.get()),-a*np.sin(phi.get())]])
-
-              # Ley de control
-
-              qpRef = np.linalg.inv(J)@(K@he)
-
-              uRef.set(round(qpRef[0][0],3))
-              wRef.set(round(qpRef[1][0],3))
-              
-          else:
-              uRef.set(0)
-              wRef.set(0)
-
-          if btnVar.get() == 'Start':
-              #Calculo wL y  wR
-              L = 0.311 # Cambiar
-              R = 0.034 # Cambiar
-              wR = (2.0*uRef.get() + L*wRef.get()) / (2.0 * R)
-              wL = (2.0*uRef.get() - L*wRef.get()) / (2.0 * R)
-
-              pub_left.publish(wL)
-              print ("wL target: ", wL)
-              pub_right.publish(wR)
-              print ("wR target: ", wR)
+        # Rueda izquierda
+        wL = nL[1]*math.pi*2/1425.1/elapsed_time
+        rpmL = wL * 30.0 / math.pi
+        print("Left Real Velocity: ", wL)
+        print("Left Target Velocity: ", target_left)
+        # print("RPM en llanta izquierda: ", rpmR)
+        #Calculo errores
+        error_izq  = target_left - wL
+        error_der  = target_right - wR
 
 
+        #Calculo PID
+        cv_izq = cv1_izq + (Kp_izq + Kd_izq/elapsed_time)*error_izq + (-Kp_izq + Ki_izq*elapsed_time - 2*Kd_izq/elapsed_time) * error1_izq + (Kd_izq/elapsed_time)*error2_izq
+        cv1_izq = cv_izq
+        error2_izq = error1_izq
+        error1_izq = error_izq
 
-              #####arduino.sendData([uRef.get(),wRef.get()])
-              pass
-              
-          else:
-              
-              #######arduino.sendData([0,0])
-              pass
-         
-          img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-          img = Image.fromarray(img)
-          #img.thumbnail((400,400))
-          tkimage = ImageTk.PhotoImage(img)
-          label1.configure(image = tkimage)
-          label1.image = tkimage
-  
-     else:
-          onClosing()
+        cv_der = cv1_der + (Kp_der + Kd_der/elapsed_time)*error_der + (-Kp_der + Ki_der*elapsed_time - 2*Kd_der/elapsed_time) * error1_der + (Kd_der/elapsed_time)*error2_der
+        cv1_der = cv_der
+        error2_der = error1_der
+        error1_der = error_der
 
-     root.after(100,callback)
+        #Saturacion
+        if (cv_izq > 50.0):
+            cv_izq = 50.0
 
-pub_left = rospy.Publisher('target_left', Float64, queue_size=10)
-pub_right = rospy.Publisher('target_right', Float64, queue_size=10)
-pub_x_target = rospy.Publisher('x_target', Float64, queue_size=10)
-pub_y_target = rospy.Publisher('y_target', Float64, queue_size=10)
-pub_x_real = rospy.Publisher('x_real', Float64, queue_size=10)
-pub_y_real = rospy.Publisher('y_real', Float64, queue_size=10)
+        if (cv_izq < -50):
+            cv_izq = -50.0
 
+        if (cv_izq < 10 and cv_izq > 0):
+            cv_izq = 10
 
-rospy.Subscriber("th_odom_rad", Float64, theta_callback)
-rospy.init_node('ros_control_algorithm', anonymous=True)
+        if (cv_izq >= 0):
+            roboclaw.ForwardM2(0x81, int(cv_izq))
+        else:
+            roboclaw.BackwardM2(0x81, abs(int(cv_izq)))
 
-cap = cv2.VideoCapture(0)
+        #Saturacion
+        if (cv_der > 50.0):
+            cv_der = 50.0
 
-if cap.isOpened():
-    print("Cámara inicializada")
-else:
-    sys.exit("Cámara desconectada")
-          
-########## Arduino ########
+        if (cv_der < -50):
+            cv_der = -50.0
 
-####port = 'COM10'
-####arduino = serialArduino(port,baud=9600,sizeData=7)
-####arduino.readSerialStart()
+        if (cv_der < 10 and cv_der > 0):
+            cv_der = 10
 
-######## HMI ########
+        if (cv_der >= 0):
+            roboclaw.ForwardM1(0x81, int(cv_der))
+        else:
+            roboclaw.BackwardM1(0x81, abs(int(cv_der)))
 
-root = Tk()
-root.protocol("WM_DELETE_WINDOW",onClosing)
-root.title("Seguidor de codigos QR")
-
-
-uRef = DoubleVar(root,0)
-wRef = DoubleVar(root,0)
-phi = DoubleVar(root,0)
-
-label1 = Label(root)
-label1.grid(row=0,padx=20,pady=20)
+        #Print de theta
+        theta = theta + (((wR - wL) / largo) * radio) * elapsed_time
+        theta_deg = theta*180.0/math.pi
+        print ("Orientacion en rads: ", theta)
+        print ("Orientacion en degs: ", theta_deg)
+        pub_rad.publish(theta)
+        pub_right.publish(wR)
+        pub_left.publish(wL)
 
 
-btnVar = StringVar(root,'Pause')
-btn = Checkbutton(root, text=btnVar.get(), width=12, variable=btnVar,
-                  offvalue='Pause', onvalue='Start', indicator=False,
-                  command=toggle)
+        last_time = time.time()
+        roboclaw.ResetEncoders(0x81)
+        rate.sleep()
 
-btn.grid(row=1, padx = 20, pady = 20)
-
-
-root.after(100,callback)
-root.mainloop()
+if __name__ == '__main__':
+    try:
+        main_roboclaw()
+    except rospy.ROSInterruptException:
+        pass
